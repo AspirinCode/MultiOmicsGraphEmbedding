@@ -180,7 +180,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         self.out_channels = embedding_dim // attn_heads
         self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
         self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
-        self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), self.out_channels, self.out_channels))
+        self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels, self.out_channels))
         # self.attn_q = nn.ModuleList([nn.Sequential(nn.Tanh(), nn.Linear(attn_heads * 2, 1)) for m in self.metapaths])
 
         if attn_activation == "sharpening":
@@ -308,18 +308,16 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 alpha=(alpha_r[metapath], alpha_l[metapath]),
                 size=(num_node_tail, num_node_head),
                 metapath_idx=self.metapaths.index(metapath))
-            print("out", out.shape, f"{node_type}", num_node_head)
+            # print("out", out.shape, f"{node_type}", num_node_head)
             emb_relations[:, i] = out.view(-1, self.embedding_dim)
 
         return emb_relations
 
     def message(self, x_j, alpha_j, alpha_i, index, ptr, size_i, metapath_idx):
-        print("alpha_i", alpha_i.shape)
-        print("alpha_j", alpha_j.shape)
         # alpha = alpha_j if alpha_i is None else alpha_j + alpha_i
-        alpha = alpha_i.t() @ self.attn_q[metapath_idx] @ alpha_j
-        print("alpha", alpha.shape)
-        alpha = self.attn_activation(alpha, metapath_idx)
+        alpha = (alpha_j * alpha_i).sum(dim=-1)
+        # print("alpha", alpha.shape)
+        # alpha = self.attn_activation(alpha, metapath_idx)
         alpha = softmax(alpha, index=index, ptr=ptr, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.attn_dropout, training=self.training)
         return x_j * alpha.unsqueeze(-1)
@@ -331,14 +329,13 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         for i, metapath in enumerate(self.metapaths):
             if metapath not in edge_index_dict or edge_index_dict[metapath] is None: continue
             head, tail = metapath[0], metapath[-1]
-
             if self.first:
-                alpha_l[metapath] = (h_dict[head] * self.attn_l[i]).sum(dim=-1)
+                alpha_l[metapath] = torch.bmm(h_dict[head].transpose(1, 0), self.attn_q[i]).transpose(1, 0)
             else:
-                alpha_l[metapath] = (h_prev[head].view(-1, self.attn_heads, self.out_channels) * self.attn_l[i]).sum(
-                    dim=-1)
+                h = h_prev[head].view(-1, self.attn_heads, self.out_channels)
+                alpha_l[metapath] = torch.bmm(h.transpose(1, 0), self.attn_q[i]).transpose(1, 0)
 
-            alpha_r[metapath] = (h_dict[tail] * self.attn_r[i]).sum(dim=-1)
+            alpha_r[metapath] = h_dict[tail]
 
         return alpha_l, alpha_r
 
