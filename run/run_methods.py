@@ -2,8 +2,6 @@ import logging
 import sys
 from argparse import ArgumentParser, Namespace
 
-from run.utils import load_node_dataset
-
 logger = logging.getLogger("wandb")
 logger.setLevel(logging.ERROR)
 
@@ -16,6 +14,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 from moge.methods.node_clf import MetaPath2Vec, HAN, GTN, LATTENodeClassifier
 from pytorch_lightning.loggers import WandbLogger
 
+from run.utils import load_node_dataset
 
 def train(hparams):
     EMBEDDING_DIM = 128
@@ -71,24 +70,33 @@ def train(hparams):
         USE_AMP = False
         num_gpus = 1
         batch_order = 11
+        if "-1" in hparams.method:
+            t_order = 1
+        elif "-2" in hparams.method:
+            t_order = 2
+        elif "-3" in hparams.method:
+            t_order = 3
+        else:
+            t_order = 2
+
         model_hparams = {
             "embedding_dim": EMBEDDING_DIM,
-            "t_order": 2,
+            "t_order": t_order,
             "batch_size": 2 ** batch_order * max(num_gpus, 1),
             "nb_cls_dense_size": 0,
-            "nb_cls_dropout": 0.4,
+            "nb_cls_dropout": 0.3,
             "activation": "relu",
             "attn_heads": 64,
             "attn_activation": "LeakyReLU",
             "attn_dropout": 0.2,
             "loss_type": "BCE" if dataset.multilabel else "SOFTMAX_CROSS_ENTROPY",
-            "use_proximity_loss": True if "proximity" in hparams.method else False,
+            "use_proximity": True if "proximity" in hparams.method else False,
             "neg_sampling_ratio": 2.0,
             "n_classes": dataset.n_classes,
             "use_class_weights": False,
             "lr": 0.001 * num_gpus,
             "momentum": 0.9,
-            "weight_decay": 1e-5,
+            "weight_decay": 1e-2,
         }
 
         metrics = ["precision", "recall", "f1",
