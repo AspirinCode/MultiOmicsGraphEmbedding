@@ -334,8 +334,8 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             if self.first:
                 alpha_l[metapath] = torch.bmm(h_dict[head].transpose(1, 0), self.attn_q[i]).transpose(1, 0)
             else:
-                h = h_prev[head].view(-1, self.attn_heads, self.out_channels)
-                alpha_l[metapath] = torch.bmm(h.transpose(1, 0), self.attn_q[i]).transpose(1, 0)
+                alpha_l[metapath] = torch.bmm(h_prev[head].view(-1, self.attn_heads, self.out_channels).transpose(1, 0),
+                                              self.attn_q[i]).transpose(1, 0)
 
             alpha_r[metapath] = h_dict[tail]
 
