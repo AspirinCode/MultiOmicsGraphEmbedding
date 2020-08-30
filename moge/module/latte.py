@@ -117,11 +117,10 @@ class LATTE(nn.Module):
                 next_edge_index_dict = edge_index_dict
             else:
                 next_edge_index_dict = LATTE.join_edge_indexes(next_edge_index_dict, edge_index_dict, global_node_idx)
-                h_dict, t_loss, edge_pred_dict = self.layers[t].forward(x_l=h_dict, x_r=X,
-                                                                        edge_index_dict=next_edge_index_dict,
-                                                                        global_node_idx=global_node_idx,
-                                                                        pred_edge_index=edge_index_dict,
-                                                                        save_betas=save_betas)
+                h_dict, t_loss, _ = self.layers[t].forward(x_l=h_dict, x_r=X,
+                                                           edge_index_dict=next_edge_index_dict,
+                                                           global_node_idx=global_node_idx,
+                                                           save_betas=save_betas)
 
             for node_type in global_node_idx:
                 h_layers[node_type].append(h_dict[node_type])
@@ -232,7 +231,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             for node_type in self.embeddings:
                 self.embeddings[node_type].reset_parameters()
 
-    def forward(self, x_l, edge_index_dict, global_node_idx, x_r=None, save_betas=False, pred_edge_index=None):
+    def forward(self, x_l, edge_index_dict, global_node_idx, x_r=None, save_betas=False):
         """
 
         :param X: a dict of node attributes indexed node_type
@@ -274,13 +273,9 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             # out[node_type] = self.layer_norm(out[node_type])
             out[node_type] = self.embedding_activation(out[node_type])
 
-        del alpha_l
-        del alpha_r
         proximity_loss, edge_pred_dict = None, None
-        if self.use_proximity and pred_edge_index is not None:
-            h_dict = {k: v.view(-1, self.attn_heads, self.out_channels) for k, v in out.items()}
-            alpha_l, alpha_r = self.get_alphas(pred_edge_index, h_dict, r_dict)
-            proximity_loss, edge_pred_dict = self.proximity_loss(pred_edge_index,
+        if self.use_proximity:
+            proximity_loss, edge_pred_dict = self.proximity_loss(edge_index_dict,
                                                                  alpha_l=alpha_l, alpha_r=alpha_r,
                                                                  global_node_idx=global_node_idx)
         return out, proximity_loss, edge_pred_dict
