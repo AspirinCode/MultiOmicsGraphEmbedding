@@ -195,11 +195,11 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
             node_attr_shape = {k: v.size(1) for k, v in self.x_dict.items()}
         return node_attr_shape
 
-    def split_train_val_test(self, train_ratio, sample_indices=None):
+    def split_train_val_test(self, train_ratio, sample_indices=None, node_type=None):
         if sample_indices is not None:
             indices = sample_indices[torch.randperm(sample_indices.size(0))]
         else:
-            indices = torch.randperm(self.num_nodes_dict[self.head_node_type])
+            indices = torch.randperm(self.num_nodes_dict[node_type])
 
         num_indices = indices.size(0)
         training_idx = indices[:int(num_indices * train_ratio)]
@@ -288,7 +288,8 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
             ("tag", "tagnetwork", "tag"): self.sps_adj_to_edgeindex(data["tagnetwork"])}
         self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
         assert train_ratio is not None
-        self.training_idx, self.validation_idx, self.testing_idx = self.split_train_val_test(train_ratio)
+        self.training_idx, self.validation_idx, self.testing_idx = self.split_train_val_test(train_ratio,
+                                                                                             node_type=self.head_node_type)
 
     def process_COGDLdataset(self, dataset: HANDataset, metapath, node_types, train_ratio):
         data = dataset.data
@@ -339,7 +340,8 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
             edge_index_dict[metapath[t]].append([u, v])
         self.edge_index_dict = {metapath: torch.tensor(edges, dtype=torch.long).T for metapath, edges in
                                 edge_index_dict.items()}
-        self.training_node, self.validation_node, self.testing_node = self.split_train_val_test(train_ratio)
+        self.training_node, self.validation_node, self.testing_node = self.split_train_val_test(train_ratio,
+                                                                                                node_type=self.head_node_type)
 
     def process_inmemorydataset(self, dataset: InMemoryDataset, train_ratio):
         data = dataset[0]
@@ -359,8 +361,7 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
         self.metapaths = list(self.edge_index_dict.keys())
         assert train_ratio is not None
         self.training_idx, self.validation_idx, self.testing_idx = \
-            self.split_train_val_test(train_ratio,
-                                      sample_indices=self.y_index_dict[self.head_node_type])
+            self.split_train_val_test(train_ratio, sample_indices=self.y_index_dict[self.head_node_type])
 
     def train_dataloader(self, collate_fn=None, batch_size=128, num_workers=12, **kwargs):
         loader = data.DataLoader(self.training_idx, batch_size=batch_size,
