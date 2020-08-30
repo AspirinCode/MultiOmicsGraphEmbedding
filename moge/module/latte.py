@@ -222,8 +222,8 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
         for node_type in self.linear:
             glorot(self.linear[node_type].weight)
-        # for node_type in self.conv:
-        #     glorot(self.conv[node_type].weight)
+        for node_type in self.conv:
+            glorot(self.conv[node_type].weight)
 
         if self.embeddings is not None and len(self.embeddings.keys()) > 0:
             for node_type in self.embeddings:
@@ -362,8 +362,8 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
         # e_ij = self.attn_q[self.metapaths.index(metapath)].forward(
         #     torch.cat([alpha_l[metapath][edge_index[0]], alpha_r[metapath][edge_index[1]]], dim=1)).squeeze(-1)
-        e_ij = (alpha_r[metapath][edge_index[1]] * alpha_l[metapath][edge_index[0]]).sum(
-            dim=-1).mean()  # Mean over attn heads
+        e_ij = (alpha_r[metapath][edge_index[1]] * alpha_l[metapath][edge_index[0]]).sum(dim=-1).mean(
+            -1)  # Mean over attn heads
 
         if logits:
             return e_ij

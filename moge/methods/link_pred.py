@@ -6,7 +6,6 @@ from .node_clf import NodeClfMetrics
 from moge.generator.sampler.datasets import HeteroNetDataset
 from ..module.latte import LATTE, untag_negative, is_negative
 
-
 class LinkPredMetrics(NodeClfMetrics):
     def __init__(self, hparams, dataset, metrics):
         super(LinkPredMetrics, self).__init__(hparams, dataset, metrics)
