@@ -40,7 +40,6 @@ def train(hparams):
         logger=wandb_logger,
         # regularizers=regularizers,
         weights_summary='top',
-        use_amp=USE_AMP,
         amp_level='O1' if USE_AMP else None,
         precision=16 if USE_AMP else 32
     )
@@ -65,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument('--nb_cls_dense_size', type=int, default=0)
     parser.add_argument('--nb_cls_dropout', type=float, default=0.2)
 
-    parser.add_argument('--use_proximity_loss', type=bool, default=True)
+    parser.add_argument('--use_proximity', type=bool, default=True)
     parser.add_argument('--neg_sampling_ratio', type=float, default=10.0)
 
     parser.add_argument('--use_class_weights', action='store_true')
@@ -73,7 +72,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--loss_type', type=str, default="KL_DIVERGENCE")
     parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--weight_decay', type=float, default=1e-5)
+    parser.add_argument('--weight_decay', type=float, default=1e-2)
 
     # add all the available options to the trainer
     # parser = pl.Trainer.add_argparse_args(parser)

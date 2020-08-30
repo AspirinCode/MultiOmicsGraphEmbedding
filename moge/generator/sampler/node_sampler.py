@@ -10,9 +10,8 @@ from moge.generator.sampler.datasets import HeteroNetDataset
 
 
 class HeteroNeighborSampler(HeteroNetDataset):
-    def __init__(self, dataset, node_types=None, metapaths=None, head_node_type=None, directed=True,
-                 resample_train=None,
-                 add_reverse_metapaths=True, neighbor_sizes=[25, 20]):
+    def __init__(self, dataset, neighbor_sizes, node_types=None, metapaths=None, head_node_type=None, directed=True,
+                 resample_train=None, add_reverse_metapaths=True):
         self.neighbor_sizes = neighbor_sizes
         super(HeteroNeighborSampler, self).__init__(dataset, node_types, metapaths, head_node_type, directed,
                                                     resample_train, add_reverse_metapaths)
@@ -42,7 +41,6 @@ class HeteroNeighborSampler(HeteroNetDataset):
         if self.node_types is None:
             self.node_types = list(self.num_nodes_dict.keys())
         self.x_dict = data.x_dict
-        self.node_attr_shape = {node_type: x.size(1) for node_type, x in self.x_dict.items()}
         self.y_dict = data.y_dict
         self.y_index_dict = {node_type: torch.arange(self.num_nodes_dict[node_type]) for node_type in
                              self.y_dict.keys()}
@@ -72,7 +70,6 @@ class HeteroNeighborSampler(HeteroNetDataset):
             self.node_types = list(self.num_nodes_dict.keys())
 
         self.x_dict = {self.head_node_type: data.x} if hasattr(data, "x") else {}
-        self.node_attr_shape = {node_type: x.size(1) for node_type, x in self.x_dict.items()}
         self.y_dict = {self.head_node_type: data.y} if hasattr(data, "y") else {}
         self.y_index_dict = {node_type: torch.arange(self.num_nodes_dict[node_type]) for node_type in
                              self.y_dict.keys()}
@@ -117,7 +114,7 @@ class HeteroNeighborSampler(HeteroNetDataset):
         sampled_nodes = {k: torch.cat(v, dim=0).unique() for k, v in sampled_nodes.items()}
         return sampled_nodes
 
-    def sample(self, iloc, mode, t_order=1, filter_nodes=False):
+    def sample(self, iloc, mode, t_order=1, filter=False):
         """
 
         :param iloc: A tensor of a batch of indices in training_idx, validation_idx, or testing_idx
@@ -146,7 +143,7 @@ class HeteroNeighborSampler(HeteroNetDataset):
 
         assert np.isin(iloc, allowed_nodes).all()
 
-        if filter_nodes:
+        if filter:
             node_mask = np.isin(sampled_local_nodes[self.head_node_type], allowed_nodes)
             sampled_local_nodes[self.head_node_type] = sampled_local_nodes[self.head_node_type][node_mask]
 
@@ -163,7 +160,7 @@ class HeteroNeighborSampler(HeteroNetDataset):
         X["edge_index_dict"] = self.get_local_edge_index_dict(adjs=adjs, n_id=n_id,
                                                               sampled_local_nodes=sampled_local_nodes,
                                                               local2batch=local2batch,
-                                                              filter_nodes=filter_nodes)
+                                                              filter_nodes=filter)
 
         # x_dict attributes
         if hasattr(self, "x_dict") and len(self.x_dict) > 0:

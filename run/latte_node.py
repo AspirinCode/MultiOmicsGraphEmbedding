@@ -31,38 +31,29 @@ def train(hparams: Namespace):
     USE_AMP = False  # True if NUM_GPUS > 1 else False
     MAX_EPOCHS = 250
 
-    if hparams.t_order > 1:
-        hparams.n_neighbors_2 = max(1, 153600 // (hparams.n_neighbors_1 * hparams.batch_size))
-        neighbor_sizes = [hparams.n_neighbors_1, hparams.n_neighbors_2]
-    else:
-        neighbor_sizes = [hparams.n_neighbors_1]
-        hparams.batch_size = int(2 * hparams.batch_size)
-
-    if hparams.embedding_dim > 128:
-        hparams.batch_size = hparams.batch_size // 2
+    neighbor_sizes = [hparams.n_neighbors, ]
+    for t in range(1, hparams.t_order):
+        neighbor_sizes.extend([neighbor_sizes[-1] // 2])
     print("neighbor_sizes", neighbor_sizes)
     hparams.neighbor_sizes = neighbor_sizes
+
     dataset = load_node_dataset(hparams.dataset, method="LATTE", train_ratio=None, hparams=hparams)
 
     METRICS = ["precision", "recall", "f1", "accuracy" if dataset.multilabel else hparams.dataset, "top_k"]
-    hparams.loss_type = "BCE" if dataset.multilabel else "SOFTMAX_CROSS_ENTROPY"
+    hparams.loss_type = "BCE" if dataset.multilabel else hparams.loss_type
     hparams.n_classes = dataset.n_classes
     model = LATTENodeClassifier(hparams, dataset, collate_fn="neighbor_sampler", metrics=METRICS)
 
-    logger = WandbLogger(name=model.name(),
-                         tags=[dataset.name()],
-                         project="multiplex-comparison")
+    logger = WandbLogger(name=model.name(), tags=[dataset.name()], project="multiplex-comparison")
 
     trainer = Trainer(
         gpus=NUM_GPUS,
         distributed_backend='ddp' if NUM_GPUS > 1 else None,
+        gradient_clip_val=hparams.gradient_clip_val,
         # auto_lr_find=True,
         max_epochs=MAX_EPOCHS,
         early_stop_callback=EarlyStopping(monitor='val_loss', patience=5, min_delta=0.001, strict=False),
         logger=logger,
-        # regularizers=regularizers,
-        weights_summary='top',
-        use_amp=USE_AMP,
         amp_level='O1' if USE_AMP else None,
         precision=16 if USE_AMP else 32
     )
@@ -77,25 +68,25 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default="ogbn-mag")
     parser.add_argument("-d", '--embedding_dim', type=int, default=128)
     parser.add_argument("-t", '--t_order', type=int, default=2)
-    parser.add_argument('--batch_size', type=int, default=2000)
-    parser.add_argument('--n_neighbors_1', type=int, default=20)
+    parser.add_argument('-n', '--batch_size', type=int, default=2000)
+    parser.add_argument('--n_neighbors', type=int, default=20)
     parser.add_argument('--activation', type=str, default="relu")
     parser.add_argument('--attn_heads', type=int, default=8)
-    parser.add_argument('--attn_activation', type=str, default="sharpening")
+    parser.add_argument('--attn_activation', type=str, default="LeakyReLU")
     parser.add_argument('--attn_dropout', type=float, default=0.2)
 
-    parser.add_argument('--nb_cls_dense_size', type=int, default=0)
+    parser.add_argument('--nb_cls_dense_size', type=int, default=512)
     parser.add_argument('--nb_cls_dropout', type=float, default=0.3)
 
-    parser.add_argument('--use_proximity_loss', type=bool, default=False)
+    parser.add_argument('--use_proximity', type=bool, default=False)
     parser.add_argument('--neg_sampling_ratio', type=float, default=5.0)
-    parser.add_argument('--use_class_weights', type=bool, default=True)
+    parser.add_argument('--use_class_weights', type=bool, default=False)
     parser.add_argument('--use_reverse', type=bool, default=True)
 
     parser.add_argument('--loss_type', type=str, default="SOFTMAX_CROSS_ENTROPY")
     parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--weight_decay', type=float, default=0)
-
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
+    parser.add_argument('--gradient_clip_val', type=float, default=1.0)
     # add all the available options to the trainer
     # parser = pl.Trainer.add_argparse_args(parser)
 

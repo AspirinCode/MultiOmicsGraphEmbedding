@@ -42,21 +42,24 @@ class Network:
         index = pd.concat([pd.DataFrame(range(v), [k, ] * v) for k, v in self.num_nodes_dict.items()],
                           axis=0).reset_index()
         multi_index = pd.MultiIndex.from_frame(index, names=["node_type", "node"])
+        metapath_names = [".".join(metapath) if isinstance(metapath, tuple) else metapath for metapath in
+                          self.metapaths]
         self.node_degrees = pd.DataFrame(data=0, index=multi_index,
-                                         columns=[".".join(metapath) for metapath in self.metapaths])
+                                         columns=metapath_names)
 
-        for metapath in self.metapaths:
+        for metapath, name in zip(self.metapaths, metapath_names):
             edge_index = self.edge_index_dict[metapath]
 
+            head, tail = metapath[0], metapath[-1]
             D = torch_sparse.SparseTensor(row=edge_index[0], col=edge_index[1],
-                                          sparse_sizes=(self.num_nodes_dict[metapath[0]],
-                                                        self.num_nodes_dict[metapath[-1]]))
-            metapath_name = ".".join(metapath)
-            self.node_degrees.loc[(metapath[0], metapath_name)] = (
-                    self.node_degrees.loc[(metapath[0], metapath_name)] + D.storage.rowcount().numpy()).values
+                                          sparse_sizes=(self.num_nodes_dict[head],
+                                                        self.num_nodes_dict[tail]))
+
+            self.node_degrees.loc[(head, name)] = (
+                    self.node_degrees.loc[(head, name)] + D.storage.rowcount().numpy()).values
             if not directed:
-                self.node_degrees.loc[(metapath[-1], metapath_name)] = (
-                        self.node_degrees.loc[(metapath[-1], metapath_name)] + D.storage.colcount().numpy()).values
+                self.node_degrees.loc[(tail, name)] = (
+                        self.node_degrees.loc[(tail, name)] + D.storage.colcount().numpy()).values
 
         return self.node_degrees
 
@@ -169,14 +172,9 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
             print("WARNING: Dataset doesn't have node label (y_dict attribute).")
 
         assert hasattr(self, "num_nodes_dict")
-        if not hasattr(self, "node_attr_shape"):
-            self.node_attr_shape = {}
 
         if not hasattr(self, "x_dict") or len(self.x_dict) == 0:
             self.x_dict = {}
-            self.node_attr_shape = {}
-        else:
-            self.node_attr_shape = {k: v.size(1) for k, v in self.x_dict.items()}
 
         if resample_train is not None and resample_train > 0:
             self.resample_training_idx(resample_train)
@@ -188,6 +186,14 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
             return self.dataset.__class__.__name__
         else:
             return self._name
+
+    @property
+    def node_attr_shape(self):
+        if not hasattr(self, "x_dict") or len(self.x_dict) == 0:
+            node_attr_shape = {}
+        else:
+            node_attr_shape = {k: v.size(1) for k, v in self.x_dict.items()}
+        return node_attr_shape
 
     def split_train_val_test(self, train_ratio, sample_indices=None):
         if sample_indices is not None:
@@ -339,7 +345,6 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
         data = dataset[0]
         self.edge_index_dict = data.edge_index_dict
         self.num_nodes_dict = data.num_nodes_dict
-        self.node_attr_shape = {}
         if self.node_types is None:
             self.node_types = list(data.num_nodes_dict.keys())
         self.y_dict = data.y_dict
@@ -366,7 +371,7 @@ class HeteroNetDataset(torch.utils.data.Dataset, Network):
                                                                                                         **kwargs))
         return loader
 
-    def val_dataloader(self, collate_fn=None, batch_size=128, num_workers=4, **kwargs):
+    def valid_dataloader(self, collate_fn=None, batch_size=128, num_workers=4, **kwargs):
         loader = data.DataLoader(self.validation_idx, batch_size=batch_size,
                                  shuffle=True, num_workers=num_workers,
                                  collate_fn=collate_fn if callable(collate_fn) else self.get_collate_fn(collate_fn,

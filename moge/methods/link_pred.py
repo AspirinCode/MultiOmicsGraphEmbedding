@@ -19,20 +19,20 @@ class LATTELinkPredictor(LinkPredMetrics):
         self.head_node_type = dataset.head_node_type
         self.dataset = dataset
         self.multilabel = dataset.multilabel
-        self._name = f"LATTE-{hparams.t_order}{' Link' if hparams.use_proximity_loss else ''}"
+        self._name = f"LATTE-{hparams.t_order}{' Link' if hparams.use_proximity else ''}"
         self.collate_fn = collate_fn
 
-        self.latte = LATTE(in_channels_dict=dataset.node_attr_shape, embedding_dim=hparams.embedding_dim,
-                           t_order=hparams.t_order, num_nodes_dict=dataset.num_nodes_dict,
+        self.latte = LATTE(t_order=hparams.t_order, embedding_dim=hparams.embedding_dim,
+                           in_channels_dict=dataset.node_attr_shape, num_nodes_dict=dataset.num_nodes_dict,
                            metapaths=dataset.get_metapaths(), attn_heads=hparams.attn_heads,
-                           attn_dropout=hparams.attn_dropout, attn_activation=hparams.attn_activation,
-                           use_proximity_loss=True,
-                           neg_sampling_ratio=hparams.neg_sampling_ratio)
+                           attn_activation=hparams.attn_activation, attn_dropout=hparams.attn_dropout,
+                           use_proximity=True, neg_sampling_ratio=hparams.neg_sampling_ratio)
         hparams.embedding_dim = hparams.embedding_dim * hparams.t_order
 
     def forward(self, X: dict, **kwargs):
-        embeddings, proximity_loss, edge_pred_dict = self.latte.forward(X["x_dict"], X["global_node_index"],
-                                                                        X["edge_index_dict"],
+        embeddings, proximity_loss, edge_pred_dict = self.latte.forward(X["x_dict"],
+                                                                        edge_index_dict=X["edge_index_dict"],
+                                                                        global_node_idx=X["global_node_index"],
                                                                         **kwargs)
         return embeddings, proximity_loss, edge_pred_dict
 
@@ -97,9 +97,9 @@ class LATTELinkPredictor(LinkPredMetrics):
                                                  0.4 * multiprocessing.cpu_count()))  # int(0.8 * multiprocessing.cpu_count())
 
     def val_dataloader(self, batch_size=None):
-        return self.dataset.val_dataloader(collate_fn=self.collate_fn,
-                                           batch_size=self.hparams.batch_size // 4,
-                                           num_workers=max(1, int(0.1 * multiprocessing.cpu_count())))
+        return self.dataset.valid_dataloader(collate_fn=self.collate_fn,
+                                             batch_size=self.hparams.batch_size // 4,
+                                             num_workers=max(1, int(0.1 * multiprocessing.cpu_count())))
 
     def test_dataloader(self, batch_size=None):
         return self.dataset.test_dataloader(collate_fn=self.collate_fn,

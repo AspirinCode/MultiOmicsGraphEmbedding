@@ -90,6 +90,15 @@ class NodeClfMetrics(pl.LightningModule):
             print(f"y_true {len(y_true_dict)} classes",
                   {str(k): v for k, v in itertools.islice(y_true_dict.items(), n_top_class)})
 
+    def get_n_params(self):
+        size = 0
+        for name, param in dict(self.named_parameters()).items():
+            nn = 1
+            for s in list(param.size()):
+                nn = nn * s
+            size += nn
+        return size
+
 
 class LATTENodeClassifier(NodeClfMetrics):
     def __init__(self, hparams, dataset: HeteroNetDataset, metrics=["accuracy"], collate_fn="neighbor_sampler") -> None:
@@ -98,16 +107,17 @@ class LATTENodeClassifier(NodeClfMetrics):
         self.dataset = dataset
         self.multilabel = dataset.multilabel
         self.y_types = list(dataset.y_dict.keys())
-        self._name = f"LATTE-{hparams.t_order}{' proximity' if hparams.use_proximity_loss else ''}"
+        self._name = f"LATTE-{hparams.t_order}{' proximity' if hparams.use_proximity else ''}"
         self.collate_fn = collate_fn
 
-        self.latte = LATTE(in_channels_dict=dataset.node_attr_shape, embedding_dim=hparams.embedding_dim,
-                           t_order=hparams.t_order, num_nodes_dict=dataset.num_nodes_dict,
+        self.latte = LATTE(t_order=hparams.t_order, embedding_dim=hparams.embedding_dim,
+                           in_channels_dict=dataset.node_attr_shape, num_nodes_dict=dataset.num_nodes_dict,
                            metapaths=dataset.get_metapaths(), activation=hparams.activation,
                            attn_heads=hparams.attn_heads, attn_activation=hparams.attn_activation,
-                           attn_dropout=hparams.attn_dropout, use_proximity_loss=hparams.use_proximity_loss,
+                           attn_dropout=hparams.attn_dropout, use_proximity=hparams.use_proximity,
                            neg_sampling_ratio=hparams.neg_sampling_ratio)
         hparams.embedding_dim = hparams.embedding_dim * hparams.t_order
+
         self.classifier = DenseClassification(hparams)
         # self.classifier = MulticlassClassification(num_feature=hparams.embedding_dim,
         #                                            num_class=hparams.n_classes,
@@ -117,11 +127,11 @@ class LATTENodeClassifier(NodeClfMetrics):
                                                                                  hparams.use_class_weights else None,
                                             loss_type=hparams.loss_type,
                                             multilabel=dataset.multilabel)
+        self.hparams.n_params = self.get_n_params()
 
-    def forward(self, X: dict, **kwargs):
-        embeddings, proximity_loss, _ = self.latte.forward(X["x_dict"], X["global_node_index"], X["edge_index_dict"],
-                                                           **kwargs)
-
+    def forward(self, input: dict, **kwargs):
+        embeddings, proximity_loss, _ = self.latte.forward(X=input["x_dict"], edge_index_dict=input["edge_index_dict"],
+                                                           global_node_idx=input["global_node_index"], **kwargs)
         y_hat = self.classifier.forward(embeddings[self.head_node_type])
         return y_hat, proximity_loss
 
@@ -133,12 +143,12 @@ class LATTENodeClassifier(NodeClfMetrics):
             y = y[self.head_node_type]
 
         y_hat, y = filter_samples(Y_hat=y_hat, Y=y, weights=weights)
-        loss = self.criterion(y_hat, y)
+        loss = self.criterion.forward(y_hat, y)
 
         self.train_metrics.update_metrics(y_hat, y, weights=None)
 
         logs = None
-        if self.hparams.use_proximity_loss:
+        if self.hparams.use_proximity:
             loss = loss + proximity_loss
             logs = {"proximity_loss": proximity_loss}
 
@@ -149,23 +159,26 @@ class LATTENodeClassifier(NodeClfMetrics):
 
     def validation_step(self, batch, batch_nb):
         X, y, weights = batch
-        # print({k: {j: l.shape for j, l in v.items()} for k, v in X.items()})
         y_hat, proximity_loss = self.forward(X)
+
         if isinstance(y, dict) and len(y) > 1:
             y = y[self.head_node_type]
+
         y_hat, y = filter_samples(Y_hat=y_hat, Y=y, weights=weights)
-        val_loss = self.criterion(y_hat, y)
+        val_loss = self.criterion.forward(y_hat, y)
+        # if batch_nb == 0:
+        #     self.print_pred_class_counts(y_hat, y, multilabel=self.dataset.multilabel)
 
         self.valid_metrics.update_metrics(y_hat, y, weights=None)
 
-        if self.hparams.use_proximity_loss:
+        if self.hparams.use_proximity:
             val_loss = val_loss + proximity_loss
 
         return {"val_loss": val_loss}
 
     def test_step(self, batch, batch_nb):
         X, y, weights = batch
-        y_hat, proximity_loss = self.forward(X)
+        y_hat, proximity_loss = self.forward(X, save_betas=True)
         if isinstance(y, dict) and len(y) > 1:
             y = y[self.head_node_type]
         y_hat, y = filter_samples(Y_hat=y_hat, Y=y, weights=weights)
@@ -176,7 +189,7 @@ class LATTENodeClassifier(NodeClfMetrics):
 
         self.test_metrics.update_metrics(y_hat, y, weights=None)
 
-        if self.hparams.use_proximity_loss:
+        if self.hparams.use_proximity:
             test_loss = test_loss + proximity_loss
 
         return {"test_loss": test_loss}
@@ -188,10 +201,10 @@ class LATTENodeClassifier(NodeClfMetrics):
                                              t_order=self.hparams.t_order)
 
     def val_dataloader(self, batch_size=None):
-        return self.dataset.val_dataloader(collate_fn=self.collate_fn,
-                                           batch_size=self.hparams.batch_size,
-                                           num_workers=max(1, int(0.1 * multiprocessing.cpu_count())),
-                                           t_order=self.hparams.t_order)
+        return self.dataset.valid_dataloader(collate_fn=self.collate_fn,
+                                             batch_size=self.hparams.batch_size,
+                                             num_workers=max(1, int(0.1 * multiprocessing.cpu_count())),
+                                             t_order=self.hparams.t_order)
 
     def test_dataloader(self, batch_size=None):
         return self.dataset.test_dataloader(collate_fn=self.collate_fn,
@@ -204,7 +217,15 @@ class LATTENodeClassifier(NodeClfMetrics):
                                      lr=self.hparams.lr,  # momentum=self.hparams.momentum,
                                      weight_decay=self.hparams.weight_decay)
         scheduler = ReduceLROnPlateau(optimizer)
-
+        # param_optimizer = list(self.named_parameters())
+        # no_decay = ['bias', 'layer_norm']
+        # optimizer_grouped_parameters = [
+        #     {'params': [p for name, p in param_optimizer if not any(key in name for key in no_decay)],
+        #      'weight_decay': 0.01},
+        #     {'params': [p for name, p in param_optimizer if any(key in name for key in no_decay)], 'weight_decay': 0.0}
+        # ]
+        #
+        # optimizer = torch.optim.AdamW(optimizer_grouped_parameters, eps=1e-06, lr=self.hparams.lr)
         return [optimizer], [scheduler]
 
 
@@ -238,6 +259,7 @@ class GTN(NodeClfMetrics, Gtn):
 
         self.dataset = dataset
         self.head_node_type = self.dataset.head_node_type
+        self.hparams.n_params = self.get_n_params()
 
     def forward(self, A, X, x_idx):
         if X is None:
@@ -312,7 +334,7 @@ class GTN(NodeClfMetrics, Gtn):
         return self.dataset.train_dataloader(collate_fn=self.collate_fn, batch_size=self.hparams.batch_size)
 
     def val_dataloader(self):
-        return self.dataset.val_dataloader(collate_fn=self.val_collate_fn, batch_size=self.hparams.batch_size * 2)
+        return self.dataset.valid_dataloader(collate_fn=self.val_collate_fn, batch_size=self.hparams.batch_size * 2)
 
     def test_dataloader(self):
         return self.dataset.test_dataloader(collate_fn=self.val_collate_fn, batch_size=self.hparams.batch_size * 2)
@@ -351,6 +373,7 @@ class HAN(NodeClfMetrics, Han):
         self.hparams = hparams
         self.dataset = dataset
         self.head_node_type = self.dataset.head_node_type
+        self.hparams.n_params = self.get_n_params()
 
     def forward(self, A, X, x_idx):
         if X is None:
@@ -361,7 +384,7 @@ class HAN(NodeClfMetrics, Han):
 
 
         for i in range(self.num_layers):
-            X = self.layers[i].forward(X, A)
+            X = self.layers[i].forward(X, A, )
 
         if x_idx is not None and X.size(0) > x_idx.size(0):
             y = self.linear(X[x_idx])
@@ -406,7 +429,7 @@ class HAN(NodeClfMetrics, Han):
         return self.dataset.train_dataloader(collate_fn=self.collate_fn, batch_size=self.hparams.batch_size)
 
     def val_dataloader(self):
-        return self.dataset.val_dataloader(collate_fn=self.val_collate_fn, batch_size=self.hparams.batch_size * 2)
+        return self.dataset.valid_dataloader(collate_fn=self.val_collate_fn, batch_size=self.hparams.batch_size * 2)
 
     def test_dataloader(self):
         return self.dataset.test_dataloader(collate_fn=self.val_collate_fn, batch_size=self.hparams.batch_size)
@@ -455,6 +478,7 @@ class MetaPath2Vec(Metapath2vec, pl.LightningModule):
 
         hparams.name = self.name()
         self.hparams = hparams
+        self.hparams.n_params = self.get_n_params()
 
     def name(self):
         if hasattr(self, "_name"):
@@ -551,7 +575,7 @@ class MetaPath2Vec(Metapath2vec, pl.LightningModule):
         return self.dataset.train_dataloader(collate_fn=self.sample, batch_size=self.hparams.batch_size)
 
     def val_dataloader(self):
-        return self.dataset.val_dataloader(collate_fn=self.sample, batch_size=self.hparams.batch_size)
+        return self.dataset.valid_dataloader(collate_fn=self.sample, batch_size=self.hparams.batch_size)
 
     def test_dataloader(self):
         return self.dataset.test_dataloader(collate_fn=self.sample, batch_size=self.hparams.batch_size)
