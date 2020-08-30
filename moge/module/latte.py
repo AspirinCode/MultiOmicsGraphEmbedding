@@ -218,7 +218,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         for i, metapath in enumerate(self.metapaths):
             glorot(self.attn_l[i])
             glorot(self.attn_r[i])
-            # glorot(self.attn_q[i].weight)
+            glorot(self.attn_q[i])
 
         for node_type in self.linear:
             glorot(self.linear[node_type].weight)
@@ -260,13 +260,13 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 rel_embs[:, -1] = h_prev[node_type].view(-1, self.embedding_dim)
 
             # Soft-select the relation-specific embeddings by a weighted average with beta[node_type]
-            rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
-                                                                 key=rel_embs.permute(1, 0, 2),
-                                                                 value=rel_embs.permute(1, 0, 2))
+            # rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
+            #                                                      key=rel_embs.permute(1, 0, 2),
+            #                                                      value=rel_embs.permute(1, 0, 2))
             # if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
 
-            out[node_type] = rel_embs.permute(1, 0, 2)
-            out[node_type] = torch.matmul(out[node_type].permute(0, 2, 1), beta[node_type]).squeeze(-1)
+            # out[node_type] = rel_embs.permute(1, 0, 2)
+            out[node_type] = torch.matmul(rel_embs.permute(0, 2, 1), beta[node_type]).squeeze(-1)
 
             del rel_embs
             # Apply \sigma activation to all embeddings
@@ -319,7 +319,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
     def message(self, x_j, alpha_j, alpha_i, index, ptr, size_i, metapath_idx):
         alpha = (alpha_j * alpha_i).sum(dim=-1)
-        # alpha = self.attn_activation(alpha, metapath_idx)
+        alpha = self.attn_activation(alpha, metapath_idx)
         alpha = softmax(alpha, index=index, ptr=ptr, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.attn_dropout, training=self.training)
         return x_j * alpha.unsqueeze(-1)
@@ -358,10 +358,12 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         return beta
 
     def predict_scores(self, edge_index, alpha_l, alpha_r, metapath, logits=False):
-        assert metapath in self.metapaths, f"If metapath `{metapath}` is tag_negative()'ed, then pass it with untag_negative()"
+        # assert metapath in self.metapaths, f"If metapath `{metapath}` is tag_negative()'ed, then pass it with untag_negative()"
 
-        e_ij = self.attn_q[self.metapaths.index(metapath)].forward(
-            torch.cat([alpha_l[metapath][edge_index[0]], alpha_r[metapath][edge_index[1]]], dim=1)).squeeze(-1)
+        # e_ij = self.attn_q[self.metapaths.index(metapath)].forward(
+        #     torch.cat([alpha_l[metapath][edge_index[0]], alpha_r[metapath][edge_index[1]]], dim=1)).squeeze(-1)
+        e_ij = (alpha_r[metapath][edge_index[1]] * alpha_l[metapath][edge_index[0]]).sum(
+            dim=-1).mean()  # Mean over attn heads
 
         if logits:
             return e_ij
