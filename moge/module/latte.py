@@ -462,15 +462,16 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         betas = attn_weights.sum(1)
         with torch.no_grad():
             self._betas[node_type] = pd.DataFrame(betas.cpu().numpy(),
-                                                  columns=self.get_head_relations(node_type, True) + [node_type, ],
+                                                  columns=self.get_head_relations(node_type, to_str=True) + [
+                                                      node_type, ],
                                                   index=node_idx.cpu().numpy())
 
             _beta_avg = np.around(betas.mean(dim=0).cpu().numpy(), decimals=3)
             _beta_std = np.around(betas.std(dim=0).cpu().numpy(), decimals=2)
             self._beta_avg[node_type] = {metapath: _beta_avg[i] for i, metapath in
-                                         enumerate(self.get_head_relations(node_type, True) + ["self"])}
+                                         enumerate(self.get_head_relations(node_type, to_str=True) + ["self"])}
             self._beta_std[node_type] = {metapath: _beta_std[i] for i, metapath in
-                                         enumerate(self.get_head_relations(node_type, True) + ["self"])}
+                                         enumerate(self.get_head_relations(node_type, to_str=True) + ["self"])}
 
     def get_relation_weights(self):
         """
