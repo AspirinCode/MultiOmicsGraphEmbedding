@@ -158,9 +158,17 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         if self.activation not in ["sigmoid", "tanh", "relu"]:
             print(f"Embedding activation arg `{self.activation}` did not match, so uses linear activation.")
 
-        self.conv = nn.ModuleDict(
-            {node_type: nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=4, dropout=attn_dropout) \
+        self.mha = nn.ModuleDict(
+            {node_type: nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=attn_heads, dropout=attn_dropout) \
              for node_type in self.node_types})
+
+        self.conv = torch.nn.ModuleDict(
+            {node_type: torch.nn.Conv1d(
+                in_channels=in_channels_dict[
+                    node_type] if first and node_type in in_channels_dict else embedding_dim,
+                out_channels=self.num_head_relations(node_type),
+                kernel_size=1) \
+                for node_type in self.node_types})  # W_phi.shape (D x F)
 
         if first:
             self.linear = nn.ModuleDict(
@@ -171,17 +179,12 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 {node_type: nn.Linear(embedding_dim, embedding_dim, bias=True) \
                  for node_type in self.node_types})  # W.shape (D_m x D_m)
 
-        self.linear_out = nn.ModuleDict(
-            {node_type: nn.Linear(embedding_dim * self.num_head_relations(node_type), embedding_dim, bias=True) \
-             for node_type in self.node_types})
-
         self.layer_norm = nn.LayerNorm(normalized_shape=self.embedding_dim)
 
         self.out_channels = embedding_dim // attn_heads
         self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
         self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
         self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels, self.out_channels))
-        # self.attn_q = nn.ModuleList([nn.Sequential(nn.Tanh(), nn.Linear(attn_heads * 2, 1)) for m in self.metapaths])
 
         if attn_activation == "sharpening":
             self.alpha_activation = nn.Parameter(torch.Tensor(len(self.metapaths)).fill_(1.0))
@@ -195,7 +198,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
         # If some node type are not attributed, assign embeddings for them
         non_attr_node_types = (num_nodes_dict.keys() - in_channels_dict.keys())
-        if len(non_attr_node_types) > 0:
+        if first and len(non_attr_node_types) > 0:
             if embedding_dim > 256 or sum([v for k, v in self.num_nodes_dict.items()]) > 1000000:
                 print("INFO: Embedding.device = 'cpu'")
                 self.embeddings = {node_type: nn.Embedding(num_embeddings=self.num_nodes_dict[node_type],
@@ -238,6 +241,11 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         # H_t = W_t * x
         h_dict = self.get_h_dict(X, global_node_idx)
 
+        # Compute relations attention coefficients
+        beta = self.get_beta_weights(x_dict=X, h_dict=h_dict, h_prev=h_prev, global_node_idx=global_node_idx)
+        # Save beta weights from testing samples
+        if not self.training: self.save_relation_weights(beta, global_node_idx)
+
         # Compute node-level attention coefficients
         alpha_l, alpha_r = self.get_alphas(edge_index_dict, h_dict, h_prev)
 
@@ -252,19 +260,16 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 rel_embs[:, -1] = h_prev[node_type].view(-1, self.embedding_dim)
 
             # Soft-select the relation-specific embeddings by a weighted average with beta[node_type]
-            rel_embs, attn_weights = self.conv[node_type].forward(query=rel_embs.permute(1, 0, 2),
-                                                                  key=rel_embs.permute(1, 0, 2),
-                                                                  value=rel_embs.permute(1, 0, 2))
-            if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
+            rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
+                                                                 key=rel_embs.permute(1, 0, 2),
+                                                                 value=rel_embs.permute(1, 0, 2))
+            # if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
 
-            # out[node_type] = attn_out.permute(1, 0, 2).mean(1)
-            out[node_type] = self.linear_out[node_type].forward(
-                rel_embs.permute(1, 0, 2) \
-                    .contiguous() \
-                    .view(-1, self.embedding_dim * self.num_head_relations(node_type)))
+            out[node_type] = rel_embs.permute(1, 0, 2)
+            out[node_type] = torch.matmul(out[node_type].permute(0, 2, 1), beta[node_type]).squeeze(-1)
 
+            del rel_embs
             # Apply \sigma activation to all embeddings
-            # out[node_type] = self.layer_norm(out[node_type])
             out[node_type] = self.embedding_activation(out[node_type])
 
         proximity_loss, edge_pred_dict = None, None
@@ -308,15 +313,12 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 alpha=(alpha_r[metapath], alpha_l[metapath]),
                 size=(num_node_tail, num_node_head),
                 metapath_idx=self.metapaths.index(metapath))
-            # print("out", out.shape, f"{node_type}", num_node_head)
             emb_relations[:, i] = out.view(-1, self.embedding_dim)
 
         return emb_relations
 
     def message(self, x_j, alpha_j, alpha_i, index, ptr, size_i, metapath_idx):
-        # alpha = alpha_j if alpha_i is None else alpha_j + alpha_i
         alpha = (alpha_j * alpha_i).sum(dim=-1)
-        # print("alpha", alpha.shape)
         # alpha = self.attn_activation(alpha, metapath_idx)
         alpha = softmax(alpha, index=index, ptr=ptr, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.attn_dropout, training=self.training)
@@ -338,6 +340,22 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             alpha_r[metapath] = h_dict[tail]
 
         return alpha_l, alpha_r
+
+    def get_beta_weights(self, x_dict, h_dict, h_prev, global_node_idx):
+        beta = {}
+        for node_type in global_node_idx:
+            if self.first:
+                if node_type in x_dict:
+                    beta[node_type] = self.conv[node_type].forward(x_dict[node_type].unsqueeze(-1))
+                else:
+                    # node_type is not attributed, use h_dict contains self.embeddings in first layer
+                    beta[node_type] = self.conv[node_type].forward(
+                        h_dict[node_type].view(-1, self.embedding_dim).unsqueeze(-1))
+            else:
+                beta[node_type] = self.conv[node_type].forward(h_prev[node_type].unsqueeze(-1))
+
+            beta[node_type] = torch.softmax(beta[node_type], dim=1)
+        return beta
 
     def predict_scores(self, edge_index, alpha_l, alpha_r, metapath, logits=False):
         assert metapath in self.metapaths, f"If metapath `{metapath}` is tag_negative()'ed, then pass it with untag_negative()"
@@ -469,16 +487,16 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             _beta_avg = np.around(betas.mean(dim=0).cpu().numpy(), decimals=3)
             _beta_std = np.around(betas.std(dim=0).cpu().numpy(), decimals=2)
             self._beta_avg[node_type] = {metapath: _beta_avg[i] for i, metapath in
-                                         enumerate(self.get_head_relations(node_type, to_str=True) + ["self"])}
+                                         enumerate(self.get_head_relations(node_type, to_str=True) + [node_type])}
             self._beta_std[node_type] = {metapath: _beta_std[i] for i, metapath in
-                                         enumerate(self.get_head_relations(node_type, to_str=True) + ["self"])}
+                                         enumerate(self.get_head_relations(node_type, to_str=True) + [node_type])}
 
     def get_relation_weights(self):
         """
         Get the mean and std of relation attention weights for all nodes
         :return:
         """
-        return {(metapath if "." in metapath else node_type): (avg, std) \
+        return {(metapath if "." in metapath or len(metapath) > 1 else node_type): (avg, std) \
                 for node_type in self._beta_avg for (metapath, avg), (relation_b, std) in
                 zip(self._beta_avg[node_type].items(), self._beta_std[node_type].items())}
 

@@ -24,6 +24,7 @@ class Metrics():
         self.multilabel = multilabel
         self.top_ks = top_k
         self.prefix = prefix
+        add_f1_metric = False
 
         if n_classes:
             top_k = [k for k in top_k if k < n_classes]
@@ -45,7 +46,8 @@ class Metrics():
                 else:
                     self.metrics[metric] = TopKCategoricalAccuracy(k=max(int(np.log(n_classes)), 1),
                                                                    output_transform=None)
-            elif "f1" == metric:
+            elif "f1" in metric:
+                add_f1_metric = True
                 continue
             elif "accuracy" in metric:
                 self.metrics[metric] = Accuracy(is_multilabel=multilabel, output_transform=None)
@@ -58,7 +60,7 @@ class Metrics():
             else:
                 print(f"WARNING: metric {metric} doesn't exist")
 
-        if "f1" in metrics:
+        if add_f1_metric:
             assert "precision" in self.metrics and "recall" in self.metrics
 
             def macro_f1(precision, recall):
@@ -67,7 +69,10 @@ class Metrics():
             self.metrics["macro_f1"] = MetricsLambda(macro_f1, self.metrics["precision"], self.metrics["recall"])
 
             if "micro_f1" in metrics:
-                self.metrics["micro_f1"] = MetricsLambda(macro_f1, self.metrics["precision_avg"],
+                def micro_f1(precision, recall):
+                    return (precision * recall * 2 / (precision + recall + 1e-12))
+
+                self.metrics["micro_f1"] = MetricsLambda(micro_f1, self.metrics["precision_avg"],
                                                          self.metrics["recall_avg"])
 
         self.reset_metrics()
