@@ -197,7 +197,7 @@ class LATTELayer(MessagePassing, pl.LightningModule):
         self.out_channels = self.embedding_dim // self.attn_heads
         self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
         self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
-        self.attn_q = torch.nn.ModuleList([torch.nn.Linear(attn_heads * 2, 1) for m in self.metapaths])
+        self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), self.out_channels, self.out_channels))
 
         if attn_activation == "sharpening":
             self.alpha_activation = nn.Parameter(torch.Tensor(len(self.metapaths)).fill_(1.0))
@@ -285,6 +285,19 @@ class LATTELayer(MessagePassing, pl.LightningModule):
                                                                  global_node_idx=global_node_idx)
         return out, proximity_loss, edge_pred_dict
 
+    def get_h_dict(self, x_dict, global_node_idx):
+        h_dict = {}
+        for node_type in global_node_idx:
+            if node_type in x_dict:
+                h_dict[node_type] = self.linear[node_type].forward(x_dict[node_type])
+            else:
+                # Should only go here in first layer
+                h_dict[node_type] = self.embeddings[node_type].weight[global_node_idx[node_type]] \
+                    .to(self.conv[node_type].weight.device)
+
+            h_dict[node_type] = h_dict[node_type].view(-1, self.attn_heads, self.out_channels)
+        return h_dict
+
     def agg_relation_neighbors(self, node_type, alpha_l, alpha_r, h_dict, edge_index_dict, global_node_idx):
         emb_relations = torch.zeros(
             size=(global_node_idx[node_type].size(0),
@@ -317,19 +330,6 @@ class LATTELayer(MessagePassing, pl.LightningModule):
         alpha = softmax(alpha, index=index, ptr=ptr, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.attn_dropout, training=self.training)
         return x_j * alpha.unsqueeze(-1)
-
-    def get_h_dict(self, x_dict, global_node_idx):
-        h_dict = {}
-        for node_type in global_node_idx:
-            if node_type in x_dict:
-                h_dict[node_type] = self.linear[node_type].forward(x_dict[node_type])
-            else:
-                # Should only go here in first layer
-                h_dict[node_type] = self.embeddings[node_type].weight[global_node_idx[node_type]] \
-                    .to(self.conv[node_type].weight.device)
-
-            h_dict[node_type] = h_dict[node_type].view(-1, self.attn_heads, self.out_channels)
-        return h_dict
 
     def get_alphas(self, edge_index_dict, h_dict, h1_dict):
         alpha_l, alpha_r = {}, {}
