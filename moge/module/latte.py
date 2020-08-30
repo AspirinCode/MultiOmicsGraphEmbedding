@@ -178,10 +178,10 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         self.layer_norm = nn.LayerNorm(normalized_shape=self.embedding_dim)
 
         self.out_channels = embedding_dim // attn_heads
-        self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), embedding_dim, attn_heads))
-        self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), embedding_dim, attn_heads))
-        # self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, attn_heads))
-        self.attn_q = nn.ModuleList([nn.Sequential(nn.Tanh(), nn.Linear(attn_heads * 2, 1)) for m in self.metapaths])
+        self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
+        self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels))
+        self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), self.out_channels, self.out_channels))
+        # self.attn_q = nn.ModuleList([nn.Sequential(nn.Tanh(), nn.Linear(attn_heads * 2, 1)) for m in self.metapaths])
 
         if attn_activation == "sharpening":
             self.alpha_activation = nn.Parameter(torch.Tensor(len(self.metapaths)).fill_(1.0))
@@ -274,6 +274,19 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                                                                  global_node_idx=global_node_idx)
         return out, proximity_loss, edge_pred_dict
 
+    def get_h_dict(self, x_dict, global_node_idx):
+        h_dict = {}
+        for node_type in global_node_idx:
+            if node_type in x_dict:
+                h_dict[node_type] = self.linear[node_type].forward(x_dict[node_type])
+            else:
+                # Should only go here in first layer
+                h_dict[node_type] = self.embeddings[node_type].weight[global_node_idx[node_type]] \
+                    .to(self.conv[node_type].weight.device)
+
+            h_dict[node_type] = h_dict[node_type].view(-1, self.attn_heads, self.out_channels)
+        return h_dict
+
     def agg_relation_neighbors(self, node_type, alpha_l, alpha_r, h_dict, edge_index_dict, global_node_idx):
         # Initialize embeddings, size: (num_nodes, num_relations, embedding_dim)
         emb_relations = torch.zeros(
@@ -295,30 +308,22 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 alpha=(alpha_r[metapath], alpha_l[metapath]),
                 size=(num_node_tail, num_node_head),
                 metapath_idx=self.metapaths.index(metapath))
-            emb_relations[:, i] = out  # .view(-1, self.embedding_dim)
+            print("out", out.shape, f"{node_type}", num_node_head)
+            emb_relations[:, i] = out.view(-1, self.embedding_dim)
 
         return emb_relations
 
     def message(self, x_j, alpha_j, alpha_i, index, ptr, size_i, metapath_idx):
+        print("alpha_i", alpha_i.shape)
+        print("alpha_j", alpha_j.shape)
         # alpha = alpha_j if alpha_i is None else alpha_j + alpha_i
-        alpha = self.attn_q[metapath_idx].forward(torch.cat([alpha_i, alpha_j], dim=1))
+        alpha = alpha_i.t() @ self.attn_q[metapath_idx] @ alpha_j
+        print("alpha", alpha.shape)
         alpha = self.attn_activation(alpha, metapath_idx)
         alpha = softmax(alpha, index=index, ptr=ptr, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.attn_dropout, training=self.training)
-        return x_j * alpha  # .unsqueeze(-1)
+        return x_j * alpha.unsqueeze(-1)
 
-    def get_h_dict(self, x_dict, global_node_idx):
-        h_dict = {}
-        for node_type in global_node_idx:
-            if node_type in x_dict:
-                h_dict[node_type] = self.linear[node_type].forward(x_dict[node_type])
-            else:
-                # Should only go here in first layer
-                h_dict[node_type] = self.embeddings[node_type].weight[global_node_idx[node_type]] \
-                    .to(self.attn_l.device)
-
-            # h_dict[node_type] = h_dict[node_type].view(-1, self.attn_heads, self.out_channels)
-        return h_dict
 
     def get_alphas(self, edge_index_dict, h_dict, h_prev):
         alpha_l, alpha_r = {}, {}
@@ -328,11 +333,12 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             head, tail = metapath[0], metapath[-1]
 
             if self.first:
-                alpha_l[metapath] = h_dict[head] @ self.attn_l[i]
+                alpha_l[metapath] = (h_dict[head] * self.attn_l[i]).sum(dim=-1)
             else:
-                alpha_l[metapath] = h_prev[head] @ self.attn_l[i]
+                alpha_l[metapath] = (h_prev[head].view(-1, self.attn_heads, self.out_channels) * self.attn_l[i]).sum(
+                    dim=-1)
 
-            alpha_r[metapath] = h_dict[tail] @ self.attn_r[i]
+            alpha_r[metapath] = (h_dict[tail] * self.attn_r[i]).sum(dim=-1)
 
         return alpha_l, alpha_r
 

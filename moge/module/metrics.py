@@ -65,9 +65,10 @@ class Metrics():
                 return (precision * recall * 2 / (precision + recall + 1e-12)).mean()
 
             self.metrics["macro_f1"] = MetricsLambda(macro_f1, self.metrics["precision"], self.metrics["recall"])
-        elif "micro_f1" in metrics:
-            self.metrics["micro_f1"] = Fbeta(beta=1.0, average=True, precision=self.metrics["precision_avg"],
-                                             recall=self.metrics["recall_avg"])
+
+            if "micro_f1" in metrics:
+                self.metrics["micro_f1"] = MetricsLambda(macro_f1, self.metrics["precision_avg"],
+                                                         self.metrics["recall_avg"])
 
         self.reset_metrics()
 
