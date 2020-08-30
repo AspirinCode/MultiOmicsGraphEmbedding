@@ -238,12 +238,12 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         h_dict = self.get_h_dict(X, global_node_idx)
 
         # Compute relations attention coefficients
-        beta = self.get_beta_weights(X, h_dict, hprev, global_node_idx)
+        beta = self.get_beta_weights(X, h_dict, h_prev, global_node_idx)
         # Save beta weights from testing samples
         if save_betas: self.save_relation_weights(beta, global_node_idx)
 
         # Compute node-level attention coefficients
-        alpha_l, alpha_r = self.get_alphas(edge_index_dict, h_dict, h1_dict)
+        alpha_l, alpha_r = self.get_alphas(edge_index_dict, h_dict, h_prev)
 
         # For each metapath in a node_type, use GAT message passing to aggregate h_j neighbors
         out = {}
