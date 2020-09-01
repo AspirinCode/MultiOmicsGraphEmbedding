@@ -86,7 +86,7 @@ def train(hparams):
             "nb_cls_dense_size": 0,
             "nb_cls_dropout": 0.3,
             "activation": "relu",
-            "attn_heads": 64,
+            "attn_heads": 4,
             "attn_activation": "LeakyReLU",
             "attn_dropout": 0.2,
             "loss_type": "BCE" if dataset.multilabel else "SOFTMAX_CROSS_ENTROPY",

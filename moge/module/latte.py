@@ -114,6 +114,7 @@ class LATTE(nn.Module):
                                                                         edge_index_dict=edge_index_dict,
                                                                         global_node_idx=global_node_idx,
                                                                         save_betas=save_betas)
+                h1_dict = h_dict  # Save 1-order embeddings
                 next_edge_index_dict = edge_index_dict
             else:
                 next_edge_index_dict = LATTE.join_edge_indexes(next_edge_index_dict, edge_index_dict, global_node_idx)
@@ -186,6 +187,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                  for node_type, in_channels in in_channels_dict.items()})  # W.shape (F x D_m}
         self.out_channels = embedding_dim // attn_heads
         self.layer_norm = nn.LayerNorm(normalized_shape=self.embedding_dim)
+        assert embedding_dim % attn_heads == 0
         self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels, self.out_channels))
 
         if attn_activation == "sharpening":
