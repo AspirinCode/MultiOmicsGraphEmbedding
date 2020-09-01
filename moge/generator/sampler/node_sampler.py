@@ -37,11 +37,26 @@ class HeteroNeighborSampler(HeteroNetDataset):
         data = dataset[0]
         self._name = dataset.name
         self.edge_index_dict = data.edge_index_dict
-        self.num_nodes_dict = data.num_nodes_dict
+        self.num_nodes_dict = data.num_nodes_dict if hasattr(data, "num_nodes_dict") else self.get_num_nodes_dict(
+            self.edge_index_dict)
+
         if self.node_types is None:
             self.node_types = list(self.num_nodes_dict.keys())
-        self.x_dict = data.x_dict
-        self.y_dict = data.y_dict
+
+        if hasattr(data, "x_dict"):
+            self.x_dict = data.x_dict
+        elif hasattr(data, "x"):
+            self.x_dict = {self.head_node_type: data.x}
+        else:
+            self.x_dict = {}
+
+        if hasattr(data, "y_dict"):
+            self.y_dict = data.y_dict
+        elif hasattr(data, "y"):
+            self.y_dict = {self.head_node_type: data.y}
+        else:
+            self.y_dict = {}
+
         self.y_index_dict = {node_type: torch.arange(self.num_nodes_dict[node_type]) for node_type in
                              self.y_dict.keys()}
 
@@ -62,17 +77,58 @@ class HeteroNeighborSampler(HeteroNetDataset):
         data = dataset[0]
         self._name = dataset.name
         self.head_node_type = "entity"
-        self.metapaths = [(self.head_node_type, "default", self.head_node_type)]
-        self.edge_index_dict = {self.metapaths[0]: data.edge_index}
-        self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
+
+        if not hasattr(data, "edge_reltype") and not hasattr(data, "edge_attr"):
+            self.metapaths = [(self.head_node_type, "default", self.head_node_type)]
+            self.edge_index_dict = {self.metapaths[0]: data.edge_index}
+            self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
+
+
+        elif False and hasattr(data, "edge_attr") and hasattr(data, "node_species"):  # for ogbn-proteins
+            self.edge_index_dict = {}
+            edge_reltype = data.edge_attr.argmax(1)
+
+            for node_type in data.node_species.unique():
+                for edge_type in range(data.edge_attr.size(1)):
+                    edge_mask = edge_reltype == edge_type
+                    node_mask = (data.node_species[data.edge_index[0]].squeeze(-1) == node_type).logical_and(
+                        data.node_species[data.edge_index[1]].squeeze(-1) == node_type)
+
+                    edge_index = data.edge_index[:, node_mask.logical_and(edge_mask)]
+
+                    if edge_index.size(1) == 0: continue
+                    self.edge_index_dict[(str(node_type.item()), str(edge_type), str(node_type.item()))] = edge_index
+
+            self.num_nodes_dict = {str(node_type.item()): data.node_species.size(0) for node_type in
+                                   data.node_species.unique()}
+            self.metapaths = list(self.edge_index_dict.keys())
+            self.head_node_type = self.metapaths[0][0]
+            self.y_dict = {node_type: data.y for node_type in self.num_nodes_dict}
+            # TODO need to convert global node_index to local index
+
+        elif hasattr(data, "edge_attr"):  # for ogbn-proteins
+            self.edge_index_dict = {}
+            edge_reltype = data.edge_attr.argmax(1)
+
+            for edge_type in range(data.edge_attr.size(1)):
+                mask = edge_reltype == edge_type
+                edge_index = data.edge_index[:, mask]
+
+                if edge_index.size(1) == 0: continue
+                self.edge_index_dict[(self.head_node_type, str(edge_type), self.head_node_type)] = edge_index
+
+            self.metapaths = list(self.edge_index_dict.keys())
+            self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
+
+        else:
+            raise Exception("Something wrong here")
 
         if self.node_types is None:
             self.node_types = list(self.num_nodes_dict.keys())
 
-        self.x_dict = {self.head_node_type: data.x} if hasattr(data, "x") else {}
-        self.y_dict = {self.head_node_type: data.y} if hasattr(data, "y") else {}
-        self.y_index_dict = {node_type: torch.arange(self.num_nodes_dict[node_type]) for node_type in
-                             self.y_dict.keys()}
+        self.x_dict = {self.head_node_type: data.x} if hasattr(data, "x") and data.x is not None else {}
+        if not hasattr(self, "y_dict"):
+            self.y_dict = {self.head_node_type: data.y} if hasattr(data, "y") else {}
 
         self.metapaths = list(self.edge_index_dict.keys())
 

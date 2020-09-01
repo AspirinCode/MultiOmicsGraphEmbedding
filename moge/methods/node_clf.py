@@ -166,8 +166,8 @@ class LATTENodeClassifier(NodeClfMetrics):
 
         y_hat, y = filter_samples(Y_hat=y_hat, Y=y, weights=weights)
         val_loss = self.criterion.forward(y_hat, y)
-        # if batch_nb == 0:
-        #     self.print_pred_class_counts(y_hat, y, multilabel=self.dataset.multilabel)
+        if batch_nb == 0:
+            self.print_pred_class_counts(y_hat, y, multilabel=self.dataset.multilabel)
 
         self.valid_metrics.update_metrics(y_hat, y, weights=None)
 
@@ -247,8 +247,9 @@ class GTN(NodeClfMetrics, Gtn):
 
         w_out = hparams.embedding_dim
         num_channels = hparams.num_channels
-        super().__init__(hparams, dataset, metrics, num_edge, num_channels, w_in, w_out, num_class, num_nodes,
-                         num_layers)
+        super().__init__(hparams, dataset, metrics, num_edge=num_edge, num_channels=num_channels, w_in=w_in,
+                         w_out=w_out, num_class=num_class, num_nodes=num_nodes,
+                         num_layers=num_layers)
 
         if not hasattr(dataset, "x"):
             if num_nodes > 10000:
