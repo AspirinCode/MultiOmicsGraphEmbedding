@@ -35,7 +35,9 @@ class LATTE(nn.Module):
                 LATTEConv(embedding_dim=embedding_dim, in_channels_dict=in_channels_dict, num_nodes_dict=num_nodes_dict,
                           metapaths=t_order_metapaths, activation=activation, attn_heads=attn_heads,
                           attn_activation=attn_activation, attn_dropout=attn_dropout, use_proximity=use_proximity,
-                          neg_sampling_ratio=neg_sampling_ratio, first=True if t == 0 else False))
+                          neg_sampling_ratio=neg_sampling_ratio,
+                          first=True if t == 0 else False,
+                          embeddings=layers[0].embeddings if t > 0 else None))
             t_order_metapaths = LATTE.join_metapaths(t_order_metapaths, metapaths)
         self.layers = nn.ModuleList(layers)
 
@@ -141,8 +143,8 @@ class LATTE(nn.Module):
 
 class LATTEConv(MessagePassing, pl.LightningModule):
     def __init__(self, embedding_dim: int, in_channels_dict: {str: int}, num_nodes_dict: {str: int}, metapaths: list,
-                 activation: str = "relu", attn_heads=4, attn_activation="sharpening", attn_dropout=0.5,
-                 use_proximity=False, neg_sampling_ratio=1.0, first=True) -> None:
+                 activation: str = "relu", attn_heads=4, attn_activation="sharpening", attn_dropout=0.2,
+                 use_proximity=False, neg_sampling_ratio=1.0, first=True, embeddings=None) -> None:
         super(LATTEConv, self).__init__(aggr="add", flow="target_to_source", node_dim=0)
         self.first = first
         self.node_types = list(num_nodes_dict.keys())
@@ -153,14 +155,20 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         self.neg_sampling_ratio = neg_sampling_ratio
         self.attn_heads = attn_heads
         self.attn_dropout = attn_dropout
+        self.out_channels = embedding_dim // attn_heads
+        assert embedding_dim % attn_heads == 0
 
         self.activation = activation.lower()
         if self.activation not in ["sigmoid", "tanh", "relu"]:
             print(f"Embedding activation arg `{self.activation}` did not match, so uses linear activation.")
 
-        self.conv = nn.ModuleDict(
-            {node_type: nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=4, dropout=attn_dropout) \
+        self.mha = nn.ModuleDict(
+            {node_type: nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=attn_heads, dropout=attn_dropout,
+                                              kdim=self.out_channels,
+                                              vdim=self.out_channels) \
              for node_type in self.node_types})
+        self.mha_linears = torch.nn.ModuleDict(
+            {node_type: torch.nn.Linear(embedding_dim, self.out_channels, bias=True) for node_type in self.node_types})
 
         if first:
             self.linear = nn.ModuleDict(
@@ -178,10 +186,11 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         self.layer_norm = nn.LayerNorm(normalized_shape=self.embedding_dim)
 
         self.out_channels = embedding_dim // attn_heads
-        self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), embedding_dim, attn_heads))
-        self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), embedding_dim, attn_heads))
+        self.attn_l = nn.Parameter(torch.Tensor(len(self.metapaths), embedding_dim, self.out_channels))
+        self.attn_r = nn.Parameter(torch.Tensor(len(self.metapaths), embedding_dim, self.out_channels))
         # self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, attn_heads))
-        self.attn_q = nn.ModuleList([nn.Sequential(nn.Tanh(), nn.Linear(attn_heads * 2, 1)) for m in self.metapaths])
+        self.attn_q = nn.ModuleList(
+            [nn.Sequential(nn.Tanh(), nn.Linear(self.out_channels * 2, 1)) for m in self.metapaths])
 
         if attn_activation == "sharpening":
             self.alpha_activation = nn.Parameter(torch.Tensor(len(self.metapaths)).fill_(1.0))
@@ -195,7 +204,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
         # If some node type are not attributed, assign embeddings for them
         non_attr_node_types = (num_nodes_dict.keys() - in_channels_dict.keys())
-        if len(non_attr_node_types) > 0:
+        if first and len(non_attr_node_types) > 0:
             if embedding_dim > 256 or sum([v for k, v in self.num_nodes_dict.items()]) > 1000000:
                 print("INFO: Embedding.device = 'cpu'")
                 self.embeddings = {node_type: nn.Embedding(num_embeddings=self.num_nodes_dict[node_type],
@@ -206,6 +215,8 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                     {node_type: nn.Embedding(num_embeddings=self.num_nodes_dict[node_type],
                                              embedding_dim=embedding_dim,
                                              sparse=False) for node_type in non_attr_node_types})
+        elif embeddings is not None:
+            self.embeddings = embeddings
         else:
             self.embeddings = None
 
@@ -252,9 +263,10 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                 rel_embs[:, -1] = h_prev[node_type].view(-1, self.embedding_dim)
 
             # Soft-select the relation-specific embeddings by a weighted average with beta[node_type]
-            rel_embs, attn_weights = self.conv[node_type].forward(query=rel_embs.permute(1, 0, 2),
-                                                                  key=rel_embs.permute(1, 0, 2),
-                                                                  value=rel_embs.permute(1, 0, 2))
+            keys = self.mha_linears[node_type].forward(rel_embs.permute(1, 0, 2))
+            rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
+                                                                 key=keys,
+                                                                 value=keys)
             if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
 
             # out[node_type] = attn_out.permute(1, 0, 2).mean(1)
@@ -361,7 +373,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         :param global_node_idx (dict): Dict of <node_type>:<Tensor(node_idx,)>
         :return loss, edge_pred_dict: NCE loss. edge_pred_dict will contain both positive relations of shape (num_edges,) and negative relations of shape (num_edges*num_neg_edges, )
         """
-        loss = torch.tensor(0.0, dtype=torch.float, device=self.conv[self.node_types[0]].weight.device)
+        loss = torch.tensor(0.0, dtype=torch.float, device=self.mha[self.node_types[0]].weight.device)
         edge_pred_dict = {}
         for metapath, edge_index in edge_index_dict.items():
             # KL Divergence over observed positive edges or negative edges (if included)
