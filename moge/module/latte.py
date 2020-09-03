@@ -156,6 +156,8 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         self.neg_sampling_ratio = neg_sampling_ratio
         self.attn_heads = attn_heads
         self.attn_dropout = attn_dropout
+        self.out_channels = embedding_dim // attn_heads
+        assert embedding_dim % attn_heads == 0
 
         self.activation = activation.lower()
         if self.activation not in ["sigmoid", "tanh", "relu"]:
@@ -189,9 +191,8 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             self.linear_r = torch.nn.ModuleDict(
                 {node_type: torch.nn.Linear(in_channels, embedding_dim, bias=True) \
                  for node_type, in_channels in in_channels_dict.items()})  # W.shape (F x D_m}
-        self.out_channels = embedding_dim // attn_heads
+
         self.layer_norm = nn.LayerNorm(normalized_shape=self.embedding_dim)
-        assert embedding_dim % attn_heads == 0
         self.attn_q = nn.Parameter(torch.Tensor(len(self.metapaths), attn_heads, self.out_channels, self.out_channels))
 
         if attn_activation == "sharpening":
@@ -268,7 +269,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
                                                    global_node_idx)
             rel_embs[:, -1] = l_dict[node_type].view(-1, self.embedding_dim)
 
-            beta = self.conv[node_type].forward(out[node_type])
+            beta = self.conv[node_type].forward(rel_embs)
             beta = torch.softmax(beta, dim=1)
             betas[node_type] = beta
 
@@ -276,15 +277,14 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             # out[node_type] = torch.bmm(out[node_type].permute(0, 2, 1), beta).squeeze(-1)
             # out[node_type] = out[node_type].mean(dim=1)
 
-            # Soft-select the relation-specific embeddings by a weighted average with beta[node_type]
+            # Multihead attention for the relation embeddings, then perform a weighted-average with beta
             keys = self.mha_linears[node_type].forward(rel_embs.permute(1, 0, 2))
             rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
                                                                  key=keys,
                                                                  value=keys)
             if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
 
-            # out[node_type] = rel_embs.permute(1, 0, 2)
-            out[node_type] = torch.matmul(rel_embs.permute(0, 2, 1), beta).squeeze(-1)
+            out[node_type] = torch.matmul(rel_embs.permute(1, 2, 0), beta).squeeze(-1)
 
             del rel_embs
             # Apply \sigma activation to all embeddings
@@ -305,7 +305,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
     def agg_relation_neighbors(self, node_type, alpha_l, alpha_r, l_dict, r_dict, edge_index_dict, global_node_idx):
         # Initialize embeddings, size: (num_nodes, num_relations, embedding_dim)
-        emb_relations = torch.zeros(
+        rel_embs = torch.zeros(
             size=(global_node_idx[node_type].size(0),
                   self.num_head_relations(node_type),
                   self.embedding_dim)).type_as(self.conv[node_type].weight)
@@ -317,16 +317,17 @@ class LATTEConv(MessagePassing, pl.LightningModule):
 
             edge_index, _ = LATTE.get_edge_index_values(edge_index_dict[metapath])
             if edge_index is None: continue
-            # Propapate flows from target nodes to source nodes
+
+            # Propapation flows from target nodes to source nodes
             out = self.propagate(
                 edge_index=edge_index,
                 x=(r_dict[tail], l_dict[head]),
                 alpha=(alpha_r[metapath], alpha_l[metapath]),
                 size=(num_node_tail, num_node_head),
                 metapath_idx=self.metapaths.index(metapath))
-            emb_relations[:, i] = out.view(-1, self.embedding_dim)
+            rel_embs[:, i] = out.view(-1, self.embedding_dim)
 
-        return emb_relations
+        return rel_embs
 
     def message(self, x_j, alpha_j, alpha_i, index, ptr, size_i, metapath_idx):
         alpha = (alpha_j * alpha_i).sum(dim=-1)
@@ -377,7 +378,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
     def predict_scores(self, edge_index, alpha_l, alpha_r, metapath, logits=False):
         assert metapath in self.metapaths, f"If metapath `{metapath}` is tag_negative()'ed, then pass it with untag_negative()"
 
-        e_ij = (alpha_r[metapath][edge_index[1]] * alpha_l[metapath][edge_index[0]]).sum(dim=-1).mean(-1)
+        e_ij = (alpha_r[metapath][edge_index[1]] * alpha_l[metapath][edge_index[0]]).sum(dim=-1).max(-1).values
 
         if logits:
             return e_ij
