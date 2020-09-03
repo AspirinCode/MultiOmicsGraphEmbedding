@@ -162,8 +162,14 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             print(f"Embedding activation arg `{self.activation}` did not match, so uses linear activation.")
 
         self.mha = nn.ModuleDict(
-            {node_type: nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=attn_heads, dropout=attn_dropout) \
+            {node_type: nn.MultiheadAttention(embed_dim=embedding_dim,
+                                              num_heads=attn_heads,
+                                              dropout=attn_dropout,
+                                              kdim=self.out_channels,
+                                              vdim=self.out_channels) \
              for node_type in self.node_types})
+        self.mha_linears = torch.nn.ModuleDict(
+            {node_type: torch.nn.Linear(embedding_dim, self.out_channels, bias=True) for node_type in self.node_types})
 
         self.conv = nn.ModuleDict(
             {node_type: nn.Linear(in_features=embedding_dim, out_features=1) \
@@ -267,16 +273,18 @@ class LATTEConv(MessagePassing, pl.LightningModule):
             betas[node_type] = beta
 
             # Soft-select the relation-specific embeddings by a weighted average with beta[node_type]
-            out[node_type] = torch.bmm(out[node_type].permute(0, 2, 1), beta).squeeze(-1)
+            # out[node_type] = torch.bmm(out[node_type].permute(0, 2, 1), beta).squeeze(-1)
             # out[node_type] = out[node_type].mean(dim=1)
+
             # Soft-select the relation-specific embeddings by a weighted average with beta[node_type]
-            # rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
-            #                                                      key=rel_embs.permute(1, 0, 2),
-            #                                                      value=rel_embs.permute(1, 0, 2))
-            # if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
+            keys = self.mha_linears[node_type].forward(rel_embs.permute(1, 0, 2))
+            rel_embs, attn_weights = self.mha[node_type].forward(query=rel_embs.permute(1, 0, 2),
+                                                                 key=keys,
+                                                                 value=keys)
+            if save_betas: self.save_attn_weights(node_type, attn_weights, global_node_idx[node_type])
 
             # out[node_type] = rel_embs.permute(1, 0, 2)
-            out[node_type] = torch.matmul(rel_embs.permute(0, 2, 1), beta[node_type]).squeeze(-1)
+            out[node_type] = torch.matmul(rel_embs.permute(0, 2, 1), beta).squeeze(-1)
 
             del rel_embs
             # Apply \sigma activation to all embeddings
