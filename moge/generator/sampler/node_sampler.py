@@ -11,10 +11,10 @@ from moge.generator.sampler.datasets import HeteroNetDataset
 
 class HeteroNeighborSampler(HeteroNetDataset):
     def __init__(self, dataset, neighbor_sizes, node_types=None, metapaths=None, head_node_type=None, directed=True,
-                 resample_train=None, add_reverse_metapaths=True):
+                 resample_train=None, add_reverse_metapaths=True, inductive=False):
         self.neighbor_sizes = neighbor_sizes
         super(HeteroNeighborSampler, self).__init__(dataset, node_types, metapaths, head_node_type, directed,
-                                                    resample_train, add_reverse_metapaths)
+                                                    resample_train, add_reverse_metapaths, inductive)
 
         if self.use_reverse:
             self.add_reverse_edge_index(self.edge_index_dict)
@@ -34,11 +34,12 @@ class HeteroNeighborSampler(HeteroNetDataset):
                                                 sizes=self.neighbor_sizes, batch_size=128, shuffle=True)
 
     def process_PygNodeDataset_hetero(self, dataset: PygNodePropPredDataset, ):
-        data = dataset.data
+        data = dataset[0]
         self._name = dataset.name
         self.edge_index_dict = data.edge_index_dict
         self.num_nodes_dict = data.num_nodes_dict if hasattr(data, "num_nodes_dict") else self.get_num_nodes_dict(
             self.edge_index_dict)
+
         if self.node_types is None:
             self.node_types = list(self.num_nodes_dict.keys())
 
@@ -73,31 +74,61 @@ class HeteroNeighborSampler(HeteroNetDataset):
                                                                    split_idx["test"][self.head_node_type]
 
     def process_PygNodeDataset_homo(self, dataset: PygNodePropPredDataset, ):
-        data = dataset.data
+        data = dataset[0]
         self._name = dataset.name
         self.head_node_type = "entity"
 
         if not hasattr(data, "edge_reltype") and not hasattr(data, "edge_attr"):
             self.metapaths = [(self.head_node_type, "default", self.head_node_type)]
             self.edge_index_dict = {self.metapaths[0]: data.edge_index}
+            self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
+
+
+        elif False and hasattr(data, "edge_attr") and hasattr(data, "node_species"):  # for ogbn-proteins
+            self.edge_index_dict = {}
+            edge_reltype = data.edge_attr.argmax(1)
+
+            for node_type in data.node_species.unique():
+                for edge_type in range(data.edge_attr.size(1)):
+                    edge_mask = edge_reltype == edge_type
+                    node_mask = (data.node_species[data.edge_index[0]].squeeze(-1) == node_type).logical_and(
+                        data.node_species[data.edge_index[1]].squeeze(-1) == node_type)
+
+                    edge_index = data.edge_index[:, node_mask.logical_and(edge_mask)]
+
+                    if edge_index.size(1) == 0: continue
+                    self.edge_index_dict[(str(node_type.item()), str(edge_type), str(node_type.item()))] = edge_index
+
+            self.num_nodes_dict = {str(node_type.item()): data.node_species.size(0) for node_type in
+                                   data.node_species.unique()}
+            self.metapaths = list(self.edge_index_dict.keys())
+            self.head_node_type = self.metapaths[0][0]
+            self.y_dict = {node_type: data.y for node_type in self.num_nodes_dict}
+            # TODO need to convert global node_index to local index
+
         elif hasattr(data, "edge_attr"):  # for ogbn-proteins
             self.edge_index_dict = {}
+            edge_reltype = data.edge_attr.argmax(1)
+
             for edge_type in range(data.edge_attr.size(1)):
-                mask = data.edge_attr.argmax(1) == edge_type
+                mask = edge_reltype == edge_type
                 edge_index = data.edge_index[:, mask]
-                self.edge_index_dict[("protein", str(edge_type), "protein")] = edge_index
+
+                if edge_index.size(1) == 0: continue
+                self.edge_index_dict[(self.head_node_type, str(edge_type), self.head_node_type)] = edge_index
 
             self.metapaths = list(self.edge_index_dict.keys())
+            self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
+
         else:
             raise Exception("Something wrong here")
-
-        self.num_nodes_dict = self.get_num_nodes_dict(self.edge_index_dict)
 
         if self.node_types is None:
             self.node_types = list(self.num_nodes_dict.keys())
 
-        self.x_dict = {self.head_node_type: data.x} if hasattr(data, "x") else {}
-        self.y_dict = {self.head_node_type: data.y} if hasattr(data, "y") else {}
+        self.x_dict = {self.head_node_type: data.x} if hasattr(data, "x") and data.x is not None else {}
+        if not hasattr(self, "y_dict"):
+            self.y_dict = {self.head_node_type: data.y} if hasattr(data, "y") else {}
 
         self.metapaths = list(self.edge_index_dict.keys())
 
@@ -105,18 +136,16 @@ class HeteroNeighborSampler(HeteroNetDataset):
         self.training_idx, self.validation_idx, self.testing_idx = split_idx["train"], split_idx["valid"], split_idx[
             "test"]
 
-    def get_collate_fn(self, collate_fn: str, batch_size=None, mode=None, t_order=1):
-        assert mode is not None, "Must pass arg mode at get_collate_fn()"
+    def get_collate_fn(self, collate_fn: str, mode=None):
+        assert mode is not None, "Must pass arg `mode` at get_collate_fn(). {'train', 'valid', 'test'}"
 
         def collate_wrapper(iloc):
-            return self.sample(iloc, mode=mode, t_order=t_order)
+            return self.sample(iloc, mode=mode)
 
         if "neighbor_sampler" in collate_fn:
             return collate_wrapper
-        if "HAN" in collate_fn:
-            return self.collate_HAN
         else:
-            raise Exception(f"Collate function {collate_fn} not found.")
+            return super().get_collate_fn(collate_fn, mode=mode)
 
     def get_local_nodes_dict(self, adjs, n_id):
         """
@@ -139,7 +168,7 @@ class HeteroNeighborSampler(HeteroNetDataset):
         sampled_nodes = {k: torch.cat(v, dim=0).unique() for k, v in sampled_nodes.items()}
         return sampled_nodes
 
-    def sample(self, iloc, mode, t_order=1, filter=False):
+    def sample(self, iloc, mode):
         """
 
         :param iloc: A tensor of a batch of indices in training_idx, validation_idx, or testing_idx
@@ -156,12 +185,13 @@ class HeteroNeighborSampler(HeteroNetDataset):
 
         # Ensure the sampled nodes only either belongs to training, validation, or testing set
         if "train" in mode:
+            filter = True if self.inductive else False
             allowed_nodes = self.training_idx
-        elif "train_valid" in mode:
-            allowed_nodes = torch.cat([self.training_idx, self.validation_idx], dim=0)
         elif "valid" in mode:
+            filter = False
             allowed_nodes = self.validation_idx
         elif "test" in mode:
+            filter = False
             allowed_nodes = self.testing_idx
         else:
             raise Exception(f"Must set `mode` to either 'training', 'validation', or 'testing'. mode={mode}")

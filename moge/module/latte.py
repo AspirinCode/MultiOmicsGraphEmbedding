@@ -112,7 +112,7 @@ class LATTE(nn.Module):
         h_layers = {node_type: [] for node_type in global_node_idx}
         for t in range(self.t_order):
             if t == 0:
-                h_dict, t_loss, edge_pred_dict = self.layers[t].forward(x_l=X, x_r=None,
+                h_dict, t_loss, edge_pred_dict = self.layers[t].forward(x_l=X, x_r=X,
                                                                         edge_index_dict=edge_index_dict,
                                                                         global_node_idx=global_node_idx,
                                                                         save_betas=save_betas)
@@ -250,7 +250,7 @@ class LATTEConv(MessagePassing, pl.LightningModule):
         """
         # H_t = W_t * x
         l_dict = self.get_h_dict(x_l, global_node_idx, left_right="left")
-        r_dict = self.get_h_dict(x_l if self.first else x_r, global_node_idx, left_right="right")
+        r_dict = self.get_h_dict(x_r, global_node_idx, left_right="right")
 
         # Compute relations attention coefficients
         beta = self.get_beta_weights(l_dict)
